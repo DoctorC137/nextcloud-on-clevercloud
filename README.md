@@ -82,6 +82,17 @@ clever login
 
 ### First deployment
 
+#### 1. Create your repo from this template
+
+Click **Use this template → Create a new repository** at the top of this page, then clone your new repo:
+
+```bash
+git clone git@github.com:<you>/nextcloud-on-clevercloud.git
+cd nextcloud-on-clevercloud
+```
+
+#### 2. Run the provisioning script
+
 ```bash
 bash deploy/clever-deploy.sh
 ```
@@ -91,7 +102,7 @@ The script provisions the PHP app, PostgreSQL, Redis, FS Bucket and Cellar, inje
 ### Redeploy
 
 ```bash
-git push origin main:master
+git push origin main
 # or
 clever deploy --alias nextcloud --force
 ```
