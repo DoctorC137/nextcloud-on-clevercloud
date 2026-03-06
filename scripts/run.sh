@@ -1,54 +1,26 @@
 #!/bin/bash
 # =============================================================================
 # run.sh — CC_PRE_RUN_HOOK — no-fsbucket
-# Sans FS Bucket : config.php reconstruit depuis env vars à chaque démarrage.
-# Secrets (instanceid, passwordsalt, secret) et version installée persistés
-# comme variables d'environnement Clever Cloud via l'API.
-# custom_apps/ synchronisé depuis/vers Cellar S3 via rclone.
+# Secrets persistés dans PostgreSQL pour une robustesse absolue.
 # =============================================================================
-
 set -e
-
 echo "==> Démarrage Nextcloud (no-fsbucket)..."
 
-# -----------------------------------------------------------------------------
-# Variables obligatoires
-# -----------------------------------------------------------------------------
 REQUIRED_VARS=(
     NEXTCLOUD_DOMAIN NEXTCLOUD_ADMIN_USER NEXTCLOUD_ADMIN_PASSWORD
     POSTGRESQL_ADDON_DB POSTGRESQL_ADDON_HOST POSTGRESQL_ADDON_PORT
     POSTGRESQL_ADDON_USER POSTGRESQL_ADDON_PASSWORD
     REDIS_HOST REDIS_PORT REDIS_PASSWORD
     CELLAR_ADDON_KEY_ID CELLAR_ADDON_KEY_SECRET CELLAR_ADDON_HOST CELLAR_BUCKET_NAME
-    CC_APP_ID CC_ENVIRON_UPDATE_TOKEN CC_ENVIRON_UPDATE_URL
 )
-MISSING=0
 for VAR in "${REQUIRED_VARS[@]}"; do
-    if [ -z "${!VAR}" ]; then echo "[ERR] Variable manquante : $VAR"; MISSING=1; fi
+    [ -z "${!VAR}" ] && echo "[ERR] Manque : $VAR" && exit 1
 done
-[ "$MISSING" -eq 1 ] && echo "[ERR] Variables manquantes, arrêt." && exit 1
-echo "[OK] Variables d'environnement OK."
 
 REAL_APP=$(cd "$(dirname "$0")/.." && pwd)
-echo "[INFO] REAL_APP=$REAL_APP"
-
-# -----------------------------------------------------------------------------
-# Dossiers locaux (éphémères — recréés à chaque démarrage)
-# -----------------------------------------------------------------------------
-mkdir -p \
-    "$REAL_APP/config" \
-    "$REAL_APP/data" \
-    "$REAL_APP/custom_apps" \
-    "$REAL_APP/themes"
-
-# -----------------------------------------------------------------------------
-# Copie des fichiers de config fragmentée
-# -----------------------------------------------------------------------------
+mkdir -p "$REAL_APP/config" "$REAL_APP/data" "$REAL_APP/custom_apps" "$REAL_APP/themes"
 cp "$REAL_APP/config-git/"*.config.php "$REAL_APP/config/" 2>/dev/null || true
 
-# -----------------------------------------------------------------------------
-# .user.ini — PHP-FPM tuning
-# -----------------------------------------------------------------------------
 cat > "$REAL_APP/.user.ini" << 'EOF'
 memory_limit = 512M
 output_buffering = 0
@@ -58,56 +30,41 @@ opcache.interned_strings_buffer = 16
 opcache.revalidate_freq = 60
 EOF
 
-# -----------------------------------------------------------------------------
-# Fonction : stocker une variable d'environnement via l'API Clever Cloud
-# -----------------------------------------------------------------------------
-cc_env_set() {
-    local KEY="$1"
-    local VALUE="$2"
-    curl -sf -X PUT \
-        "${CC_ENVIRON_UPDATE_URL}" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer ${CC_ENVIRON_UPDATE_TOKEN}" \
-        -d "{\"name\":\"${KEY}\",\"value\":\"${VALUE}\"}" \
-        >/dev/null 2>&1 \
-        && echo "[OK] Env var persistée : $KEY" \
-        || echo "[WARN] Impossible de persister $KEY via API"
+db_query() {
+    PGPASSWORD="$POSTGRESQL_ADDON_PASSWORD" psql -h "$POSTGRESQL_ADDON_HOST" -p "$POSTGRESQL_ADDON_PORT" -U "$POSTGRESQL_ADDON_USER" -d "$POSTGRESQL_ADDON_DB" -tAc "$1" 2>/dev/null || true
 }
+db_get_secret() { db_query "SELECT value FROM cc_nextcloud_secrets WHERE key = '$1';"; }
+db_set_secret() { db_query "INSERT INTO cc_nextcloud_secrets (key, value) VALUES ('$1', '$2') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;"; }
 
-# -----------------------------------------------------------------------------
-# Helper : extraire une clé depuis config.php
-# -----------------------------------------------------------------------------
+echo "[INFO] Attente de PostgreSQL..."
+PG_READY=0
+for i in $(seq 1 30); do
+    if db_query "SELECT 1;" | grep -q 1; then PG_READY=1; break; fi
+    sleep 3
+done
+[ "$PG_READY" = "0" ] && echo "[ERR] Timeout PostgreSQL." && exit 1
+
+db_query "CREATE TABLE IF NOT EXISTS cc_nextcloud_secrets (key VARCHAR(255) PRIMARY KEY, value TEXT);"
+
 extract_nc_config() {
-    local KEY="$1"
-    php -r "
-        \$CONFIG = [];
-        include '${REAL_APP}/config/config.php';
-        echo \$CONFIG['${KEY}'] ?? '';
-    " 2>/dev/null
+    php -r "\$CONFIG =[]; include '${REAL_APP}/config/config.php'; echo \$CONFIG['$1'] ?? '';" 2>/dev/null
 }
 
-# -----------------------------------------------------------------------------
-# Sync custom_apps/ depuis S3 (pull systématique au boot)
-# Les apps installées via l'interface sont ainsi restaurées à chaque démarrage
-# -----------------------------------------------------------------------------
 echo "[INFO] Synchronisation custom_apps/ depuis S3..."
 bash "$REAL_APP/scripts/sync-apps.sh" pull || true
 
-# -----------------------------------------------------------------------------
-# Détection : premier démarrage ou redémarrage
-# -----------------------------------------------------------------------------
-if [ -n "$NC_INSTANCE_ID" ] && [ -n "$NC_PASSWORD_SALT" ] && [ -n "$NC_SECRET" ]; then
-    # -------------------------------------------------------------------------
-    # REDÉMARRAGE — reconstruire config.php depuis les env vars
-    # -------------------------------------------------------------------------
-    echo "[INFO] Secrets détectés — redémarrage, reconstruction de config.php."
+NC_INSTANCE_ID=$(db_get_secret "NC_INSTANCE_ID")
+NC_PASSWORD_SALT=$(db_get_secret "NC_PASSWORD_SALT")
+NC_SECRET=$(db_get_secret "NC_SECRET")
 
-    NC_VERSION_CURRENT=$(php "$REAL_APP/occ" --version 2>/dev/null \
-        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+if [ -n "$NC_INSTANCE_ID" ] &&[ -n "$NC_PASSWORD_SALT" ] && [ -n "$NC_SECRET" ]; then
+    echo "[INFO] Secrets trouvés en BDD — redémarrage."
+    NC_VERSION_CURRENT=$(db_get_secret "NC_VERSION")
+    [ -z "$NC_VERSION_CURRENT" ] && NC_VERSION_CURRENT=$(php "$REAL_APP/occ" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
 
     cat > "$REAL_APP/config/config.php" << EOF
 <?php
-\$CONFIG = [
+\$CONFIG =[
   'instanceid'                 => '${NC_INSTANCE_ID}',
   'passwordsalt'               => '${NC_PASSWORD_SALT}',
   'secret'                     => '${NC_SECRET}',
@@ -123,34 +80,10 @@ if [ -n "$NC_INSTANCE_ID" ] && [ -n "$NC_PASSWORD_SALT" ] && [ -n "$NC_SECRET" ]
   'allow_local_remote_servers' => true,
 ];
 EOF
-    echo "[OK] config.php reconstruit depuis env vars."
-
     php "$REAL_APP/occ" upgrade --no-interaction 2>/dev/null || true
     php "$REAL_APP/occ" db:add-missing-indices --no-interaction 2>/dev/null || true
-
 else
-    # -------------------------------------------------------------------------
-    # PREMIER DÉMARRAGE — installation complète
-    # -------------------------------------------------------------------------
-    echo "[INFO] Aucun secret détecté — premier démarrage."
-
-    echo "[INFO] Attente de PostgreSQL..."
-    PG_READY=0
-    for i in $(seq 1 30); do
-        if PGPASSWORD="$POSTGRESQL_ADDON_PASSWORD" psql \
-            -h "$POSTGRESQL_ADDON_HOST" \
-            -p "$POSTGRESQL_ADDON_PORT" \
-            -U "$POSTGRESQL_ADDON_USER" \
-            -d "$POSTGRESQL_ADDON_DB" \
-            -c "SELECT 1;" >/dev/null 2>&1; then
-            PG_READY=1
-            echo "[OK] PostgreSQL prêt après $i tentative(s)."
-            break
-        fi
-        sleep 3
-    done
-    [ "$PG_READY" = "0" ] && echo "[ERR] Timeout — PostgreSQL non disponible." && exit 1
-
+    echo "[INFO] Aucun secret en BDD — installation complète."
     php "$REAL_APP/occ" maintenance:install \
         --database=pgsql \
         --database-name="$POSTGRESQL_ADDON_DB" \
@@ -162,29 +95,17 @@ else
         --data-dir="$REAL_APP/data" \
         --no-interaction
 
-    # -------------------------------------------------------------------------
-    # Extraction et persistence des secrets
-    # -------------------------------------------------------------------------
     NC_INSTANCE_ID=$(extract_nc_config "instanceid")
     NC_PASSWORD_SALT=$(extract_nc_config "passwordsalt")
     NC_SECRET=$(extract_nc_config "secret")
-    NC_VERSION_INSTALLED=$(extract_nc_config "version" | cut -d. -f1-3)
+    NC_VERSION_INSTALLED=$(extract_nc_config "version" | cut -d. -f1-3)[ -z "$NC_INSTANCE_ID" ] && echo "[ERR] Impossible d'extraire les secrets." && exit 1
 
-    if [ -z "$NC_INSTANCE_ID" ] || [ -z "$NC_PASSWORD_SALT" ] || [ -z "$NC_SECRET" ]; then
-        echo "[ERR] Impossible d'extraire les secrets depuis config.php."
-        cat "$REAL_APP/config/config.php" || true
-        exit 1
-    fi
+    echo "[INFO] Sauvegarde des secrets en BDD..."
+    db_set_secret "NC_INSTANCE_ID" "$NC_INSTANCE_ID"
+    db_set_secret "NC_PASSWORD_SALT" "$NC_PASSWORD_SALT"
+    db_set_secret "NC_SECRET" "$NC_SECRET"
+    db_set_secret "NC_VERSION" "$NC_VERSION_INSTALLED"
 
-    echo "[INFO] Persistance des secrets et version via API Clever Cloud..."
-    cc_env_set "NC_INSTANCE_ID"        "$NC_INSTANCE_ID"
-    cc_env_set "NC_PASSWORD_SALT"      "$NC_PASSWORD_SALT"
-    cc_env_set "NC_SECRET"             "$NC_SECRET"
-    cc_env_set "NC_VERSION"            "$NC_VERSION_INSTALLED"
-
-    # -------------------------------------------------------------------------
-    # Config réseau, Redis, trusted proxies
-    # -------------------------------------------------------------------------
     php "$REAL_APP/occ" config:system:set trusted_domains 0 --value="$NEXTCLOUD_DOMAIN" --no-interaction
     php "$REAL_APP/occ" config:system:set overwrite.cli.url --value="https://$NEXTCLOUD_DOMAIN" --no-interaction
     php "$REAL_APP/occ" config:system:set overwriteprotocol --value="https" --no-interaction
@@ -202,28 +123,13 @@ else
 
     php "$REAL_APP/occ" db:add-missing-indices --no-interaction 2>/dev/null || true
     php "$REAL_APP/occ" maintenance:repair --include-expensive --no-interaction 2>/dev/null || true
-
-    echo "[OK] Installation Nextcloud terminée."
 fi
 
-# -----------------------------------------------------------------------------
-# Paramètres idempotents
-# -----------------------------------------------------------------------------
 php "$REAL_APP/occ" config:system:set maintenance_window_start --value=1 --type=integer --no-interaction 2>/dev/null || true
 php "$REAL_APP/occ" config:system:set default_phone_region --value="FR" --no-interaction 2>/dev/null || true
 php "$REAL_APP/occ" config:app:set core backgroundjobs_mode --value webcron --no-interaction 2>/dev/null || true
-
-# Logs vers stdout/syslog — pas de fichier local
 php "$REAL_APP/occ" config:system:set log_type --value="syslog" --no-interaction 2>/dev/null || true
 php "$REAL_APP/occ" config:system:set loglevel --value=2 --type=integer --no-interaction 2>/dev/null || true
-
 php "$REAL_APP/occ" maintenance:mode --off --no-interaction 2>/dev/null || true
-
-# -----------------------------------------------------------------------------
-# Crontab
-# -----------------------------------------------------------------------------
-mkdir -p /home/bas/.cache/crontab
-echo "*/5 * * * * $REAL_APP/scripts/cron.sh" | crontab -
-echo "[OK] Crontab mise à jour : $REAL_APP/scripts/cron.sh"
 
 echo "[OK] Nextcloud prêt : https://$NEXTCLOUD_DOMAIN"
