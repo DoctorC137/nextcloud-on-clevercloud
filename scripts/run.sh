@@ -303,9 +303,15 @@ else
     write_config_php "$NC_INSTANCE_ID" "$NC_PASSWORD_SALT" "$NC_SECRET" "$NC_VERSION_INSTALLED"
     ensure_s3_bucket
 
-    echo "[INFO] Post-installation : indices, réparation..."
+    echo "[INFO] Post-installation : upgrade, indices, réparation..."
+    php "$REAL_APP/occ" upgrade --no-interaction 2>/dev/null || true
     php "$REAL_APP/occ" db:add-missing-indices --no-interaction 2>/dev/null || true
     php "$REAL_APP/occ" maintenance:repair --include-expensive --no-interaction 2>/dev/null || true
+
+    # Update stored version after upgrade
+    NC_VERSION_FINAL=$(php "$REAL_APP/occ" status --output=json 2>/dev/null \
+        | grep -oE '"versionstring":"[^"]*"' | cut -d'"' -f4 || true)
+    [ -n "$NC_VERSION_FINAL" ] && db_set "NC_VERSION" "$NC_VERSION_FINAL"
 
     echo "[OK] Installation Nextcloud terminée."
 fi
