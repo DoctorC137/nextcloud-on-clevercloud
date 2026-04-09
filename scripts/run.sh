@@ -33,6 +33,16 @@ echo "[INFO] REAL_APP=$REAL_APP"
 # REDIS_PORT : on ne garde que les chiffres pour éviter un cast PHP silencieux à 0
 REDIS_PORT_CLEAN=$(echo "$REDIS_PORT" | tr -dc '0-9')
 
+# Build trusted_proxies PHP array from CC_REVERSE_PROXY_IPS (auto-injected by
+# Clever Cloud at deploy time as a comma-separated list of reverse-proxy IPs).
+# Falls back to RFC-1918 private ranges when running outside Clever Cloud.
+if [ -n "$CC_REVERSE_PROXY_IPS" ]; then
+    _clean=$(echo "$CC_REVERSE_PROXY_IPS" | tr -d ' ')
+    TRUSTED_PROXIES_PHP="'$(echo "$_clean" | sed "s/,/', '/g")'"
+else
+    TRUSTED_PROXIES_PHP="'10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'"
+fi
+
 # -----------------------------------------------------------------------------
 # Dossiers locaux (éphémères, recréés à chaque démarrage)
 # -----------------------------------------------------------------------------
@@ -165,7 +175,7 @@ write_config_php() {
   'overwrite.cli.url'      => 'https://${NEXTCLOUD_DOMAIN}',
   'overwritehost'          => '${NEXTCLOUD_DOMAIN}',
   'trusted_domains'        => ['${NEXTCLOUD_DOMAIN}'],
-  'trusted_proxies'        => ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'],
+  'trusted_proxies'        => [${TRUSTED_PROXIES_PHP}],
   'forwarded_for_headers'  => ['HTTP_X_FORWARDED_FOR'],
 
   // Cache Redis
