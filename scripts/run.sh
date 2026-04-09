@@ -229,6 +229,13 @@ ensure_s3_bucket() {
         || echo "[WARN] rclone mkdir échoué — Nextcloud tentera autocreate au démarrage."
 }
 
+# Always read the version from Nextcloud's own version.php so config.php always
+# reflects the installed code version — avoids a needsDbUpgrade=true loop caused
+# by a stale version stored in DB being written back into config.php each boot.
+NC_VERSION_CODE=$(php -r "include '${REAL_APP}/version.php'; echo implode('.', \$OC_Version);" 2>/dev/null || true)
+[ -z "$NC_VERSION_CODE" ] && NC_VERSION_CODE="0.0.0.0"
+echo "[INFO] Code version: $NC_VERSION_CODE"
+
 # -----------------------------------------------------------------------------
 # PREMIER DÉMARRAGE vs REDÉMARRAGE
 # -----------------------------------------------------------------------------
@@ -247,7 +254,7 @@ if [ -n "$NC_INSTANCE_ID" ] && [ -n "$NC_PASSWORD_SALT" ] && [ -n "$NC_SECRET" ]
     fi
     [ -z "$NC_VERSION_CURRENT" ] && NC_VERSION_CURRENT="0.0.0"
 
-    write_config_php "$NC_INSTANCE_ID" "$NC_PASSWORD_SALT" "$NC_SECRET" "$NC_VERSION_CURRENT"
+    write_config_php "$NC_INSTANCE_ID" "$NC_PASSWORD_SALT" "$NC_SECRET" "$NC_VERSION_CODE"
     ensure_s3_bucket
 
     echo "[INFO] Vérification des migrations éventuelles..."
@@ -310,7 +317,7 @@ else
     db_set "NC_VERSION"       "$NC_VERSION_INSTALLED"
 
     # Réécriture du config.php complet (remplace le minimal généré par occ)
-    write_config_php "$NC_INSTANCE_ID" "$NC_PASSWORD_SALT" "$NC_SECRET" "$NC_VERSION_INSTALLED"
+    write_config_php "$NC_INSTANCE_ID" "$NC_PASSWORD_SALT" "$NC_SECRET" "$NC_VERSION_CODE"
     ensure_s3_bucket
 
     echo "[INFO] Post-installation : upgrade, indices, réparation..."
