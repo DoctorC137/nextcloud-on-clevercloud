@@ -57,18 +57,15 @@ find "$CUSTOM_APPS_DIR" -type f -exec sh -c '
 # -----------------------------------------------------------------------------
 echo "[INFO] ensure-apps: vérification de cohérence BDD ↔ filesystem..."
 
-# Lister les apps custom (hors bundled) connues en BDD
+# Lister les apps activées en BDD via oc_appconfig (source de vérité Nextcloud).
+# Seules les vraies apps ont une entrée enabled=yes — core/lib n'y figurent pas.
 DB_APPS=$(PGPASSWORD="$POSTGRESQL_ADDON_PASSWORD" psql \
     -h "$POSTGRESQL_ADDON_HOST" \
     -p "$POSTGRESQL_ADDON_PORT" \
     -U "$POSTGRESQL_ADDON_USER" \
     -d "$POSTGRESQL_ADDON_DB" \
-    -tAc "SELECT DISTINCT app FROM oc_migrations
-           WHERE app NOT IN (
-               SELECT REPLACE(configkey, 'enabled', '')
-               FROM oc_appconfig
-               WHERE configkey LIKE '%enabled%' AND configvalue = 'no'
-           );" 2>/dev/null || true)
+    -tAc "SELECT app FROM oc_appconfig
+           WHERE configkey = 'enabled' AND configvalue = 'yes';" 2>/dev/null || true)
 
 if [ -z "$DB_APPS" ]; then
     echo "[INFO] ensure-apps: aucune app en BDD ou BDD inaccessible — skip réconciliation."
