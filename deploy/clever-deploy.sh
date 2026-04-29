@@ -6,7 +6,8 @@
 #      fallback sur des prompts shell standards sinon.
 # =============================================================================
 
-set -e
+set -eE
+set -o pipefail
 
 # Couleurs ANSI (utilisées dans les fallbacks et messages courts)
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -190,11 +191,12 @@ get_real_id() {
 }
 
 # -----------------------------------------------------------------------------
-# Nettoyage automatique en cas d'erreur
+# Nettoyage automatique en cas d'erreur ou d'interruption (Ctrl+C)
 # -----------------------------------------------------------------------------
-cleanup_on_error() {
-    echo ""
-    warn "Erreur détectée — nettoyage en cours..."
+CLEANED_UP=false
+cleanup_resources() {
+    [ "$CLEANED_UP" = "true" ] && return
+    CLEANED_UP=true
     # Network Group en premier (avant les addons)
     if [ "$ENABLE_NGP" = "true" ]; then
         [ -n "$NGP_NAME_DB" ]    && echo "y" | clever ng delete "$NGP_NAME_DB"    $ORG_FLAG 2>/dev/null || true
@@ -206,9 +208,29 @@ cleanup_on_error() {
     [ -n "$APP_NAME" ]          && clever delete --app "$APP_NAME" --yes 2>/dev/null || true
     git remote remove clever 2>/dev/null || true
     rm -f .clever.json
-    warn "Nettoyage terminé."
 }
-trap cleanup_on_error ERR
+
+on_error() {
+    local exit_code=$?
+    trap - ERR INT TERM
+    echo ""
+    warn "Erreur détectée — nettoyage en cours..."
+    cleanup_resources
+    warn "Nettoyage terminé."
+    exit "$exit_code"
+}
+
+on_interrupt() {
+    trap - ERR INT TERM
+    echo ""
+    warn "Interruption (Ctrl+C) — nettoyage en cours..."
+    cleanup_resources
+    warn "Nettoyage terminé."
+    exit 130
+}
+
+trap on_error ERR
+trap on_interrupt INT TERM
 
 # =============================================================================
 # PRÉREQUIS
@@ -267,10 +289,12 @@ info "Région : $REGION"
 section "Dimensionnement — Application PHP"
 
 PHP_PLAN=$(prompt_choose "Plan de l'application PHP" "S" \
-    "nano" "nano  —  256 MB RAM, 0.5 vCPU   (test / dev)" \
-    "XS"   "XS    —  512 MB RAM, 1 vCPU     (petite équipe)" \
-    "S"    "S     —  1 GB RAM,   2 vCPUs    (usage standard)" \
-    "M"    "M     —  2 GB RAM,   4 vCPUs    (usage intensif)")
+    "nano" "nano  —  582 MB RAM, 1 vCPU      (test / dev)" \
+    "XS"   "XS    —  1.1 GB RAM, 1 vCPU      (solo, 1-3 utilisateurs)" \
+    "S"    "S     —  2 GB RAM,   2 vCPUs     (petite équipe, 5-10)" \
+    "M"    "M     —  4 GB RAM,   4 vCPUs     (équipe standard, 10-30)" \
+    "L"    "L     —  8 GB RAM,   6 vCPUs     (usage intensif, 30-100)" \
+    "XL"   "XL    —  16 GB RAM,  8 vCPUs     (grande équipe, 100+)")
 info "Plan PHP : $PHP_PLAN"
 
 # =============================================================================
@@ -279,16 +303,17 @@ info "Plan PHP : $PHP_PLAN"
 section "Dimensionnement — Base de données PostgreSQL"
 
 PG_PLAN=$(prompt_choose "Plan PostgreSQL" "xs_sml" \
-    "xxs_sml" "xxs_sml  —  1 vCPU,  512 MB RAM,  1 GB  BDD  (petite équipe)" \
-    "xs_sml"  "xs_sml   —  1 vCPU,  1 GB RAM,    5 GB  BDD  (usage standard)" \
-    "s_sml"   "s_sml    —  2 vCPUs, 2 GB RAM,   10 GB  BDD  (usage intensif)" \
-    "m_sml"   "m_sml    —  4 vCPUs, 4 GB RAM,   20 GB  BDD  (grande organisation)")
+    "xxs_sml" "xxs_sml  —  1 vCPU,  512 MB RAM,  1 GB  BDD  (solo / test)" \
+    "xs_sml"  "xs_sml   —  1 vCPU,  1 GB RAM,    5 GB  BDD  (petite équipe, 5-10)" \
+    "s_sml"   "s_sml    —  2 vCPUs, 2 GB RAM,   10 GB  BDD  (équipe standard, 10-30)" \
+    "m_sml"   "m_sml    —  4 vCPUs, 4 GB RAM,   20 GB  BDD  (grande équipe, 30+)")
 info "Plan PostgreSQL : $PG_PLAN"
 
-PG_VERSION=$(prompt_choose "Version PostgreSQL" "16" \
-    "16" "16  —  recommandée par Nextcloud (stable, éprouvée)" \
-    "17" "17  —  dernière version (fournie par défaut par Clever Cloud)" \
-    "15" "15  —  version antérieure")
+PG_VERSION=$(prompt_choose "Version PostgreSQL" "18" \
+    "18" "18  —  recommandée par Nextcloud" \
+    "17" "17  —  défaut Clever Cloud" \
+    "16" "16  —  version stable précédente" \
+    "15" "15  —  ancienne version")
 info "Version PostgreSQL : $PG_VERSION"
 
 # =============================================================================
@@ -297,10 +322,10 @@ info "Version PostgreSQL : $PG_VERSION"
 section "Dimensionnement — Cache Redis"
 
 REDIS_PLAN=$(prompt_choose "Plan Redis" "m_mono" \
-    "s_mono"  "s_mono   —  1 vCPU, 128 MB  (petite équipe)" \
-    "m_mono"  "m_mono   —  1 vCPU, 256 MB  (usage standard)" \
+    "s_mono"  "s_mono   —  1 vCPU, 128 MB  (solo / petite équipe)" \
+    "m_mono"  "m_mono   —  1 vCPU, 256 MB  (équipe standard)" \
     "l_mono"  "l_mono   —  1 vCPU, 512 MB  (usage intensif)" \
-    "xl_mono" "xl_mono  —  1 vCPU, 1 GB    (grande organisation)")
+    "xl_mono" "xl_mono  —  1 vCPU, 1 GB    (grande équipe)")
 info "Plan Redis : $REDIS_PLAN"
 
 # =============================================================================
@@ -359,7 +384,7 @@ else
     echo -e "  ${DIM}Admin      ${NC}   ${BOLD}$NEXTCLOUD_ADMIN_USER${NC}"
 fi
 echo ""
-prompt_confirm "Confirmer le déploiement ?" || { trap - ERR; warn "Annulé."; exit 0; }
+prompt_confirm "Confirmer le déploiement ?" || { trap - ERR INT TERM; warn "Annulé."; exit 0; }
 
 # =============================================================================
 # CRÉATION DES RESSOURCES
@@ -370,13 +395,14 @@ clever create --type php --region "$REGION" $ORG_FLAG --alias "$ALIAS" "$APP_NAM
 # Récupère l'APP_ID depuis .clever.json (nécessaire pour le sizing et le NGP)
 APP_ID=$(python3 -c "import json; apps=json.load(open('.clever.json'))['apps']; print(next(a['app_id'] for a in apps if a['alias']=='$ALIAS'))" 2>/dev/null)
 
-# Apply instance sizing: runtime S→chosen plan (vertical scaling), build M (separateBuild)
+# Apply instance sizing: runtime fixed à $PHP_PLAN, build M (separateBuild)
+# (minFlavor=maxFlavor évite l'erreur silencieuse min>max quand $PHP_PLAN < S)
 if [ -n "$APP_ID" ] && [ -n "$ORG_INPUT" ]; then
     clever curl -s -X PUT \
         -H "Content-Type: application/json" \
-        -d "{\"minInstances\":1,\"maxInstances\":1,\"minFlavor\":\"S\",\"maxFlavor\":\"$PHP_PLAN\",\"homogeneous\":false,\"separateBuild\":true,\"buildFlavor\":\"M\"}" \
+        -d "{\"minInstances\":1,\"maxInstances\":1,\"minFlavor\":\"$PHP_PLAN\",\"maxFlavor\":\"$PHP_PLAN\",\"homogeneous\":false,\"separateBuild\":true,\"buildFlavor\":\"M\"}" \
         "https://api.clever-cloud.com/v2/organisations/${ORG_INPUT}/applications/${APP_ID}" >/dev/null 2>&1
-    success "Runtime: S → $PHP_PLAN (vertical scaling) | Build: M (dedicated)"
+    success "Runtime: $PHP_PLAN | Build: M (dedicated)"
 fi
 
 if [ "$DOMAIN_AUTO" = "true" ]; then
@@ -521,7 +547,7 @@ fi
 info "Envoi du code source..."
 clever deploy --alias "$ALIAS" --force
 
-trap - ERR
+trap - ERR INT TERM
 
 # =============================================================================
 # SUCCÈS
