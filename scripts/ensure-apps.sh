@@ -82,13 +82,15 @@ else
         fi
 
         # App en BDD mais absente du filesystem — réinstaller
+        # memory_limit=1G : certaines apps (richdocumentscode ~700 MB) dépassent
+        # la limite CLI par défaut lors du téléchargement/extraction.
         echo "[WARN] ensure-apps: '$app' en BDD mais absente du filesystem — réinstallation..."
-        if php "$REAL_APP/occ" app:install "$app" --keep-disabled --no-interaction 2>/dev/null; then
+        if php -d memory_limit=1G "$REAL_APP/occ" app:install "$app" --keep-disabled --no-interaction 2>/dev/null; then
             echo "[OK] ensure-apps: '$app' réinstallée."
             CHANGED=1
         else
             # Tentative avec --force (app déjà enregistrée en BDD)
-            if php "$REAL_APP/occ" app:install "$app" --force --keep-disabled --no-interaction 2>/dev/null; then
+            if php -d memory_limit=1G "$REAL_APP/occ" app:install "$app" --force --keep-disabled --no-interaction 2>/dev/null; then
                 echo "[OK] ensure-apps: '$app' réinstallée (force)."
                 CHANGED=1
             else
